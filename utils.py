@@ -1,141 +1,151 @@
+import dgl
+import random
+import argparse
+import torch as th
 import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.manifold import TSNE
+import networkx as nx
+from datetime import datetime
 from collections import defaultdict
 
-def plot_embeddings(embebed_mat, side_info_mat):
-    model = TSNE(n_components=2)
-    node_pos = model.fit_transform(embebed_mat)
-    brand_color_idx, shop_color_idx, cate_color_idx = {}, {}, {}
-    for i in range(len(node_pos)):
-        brand_color_idx.setdefault(side_info_mat[i, 1], [])
-        brand_color_idx[side_info_mat[i, 1]].append(i)
-        shop_color_idx.setdefault(side_info_mat[i, 2], [])
-        shop_color_idx[side_info_mat[i, 2]].append(i)
-        cate_color_idx.setdefault(side_info_mat[i, 3], [])
-        cate_color_idx[side_info_mat[i, 3]].append(i)
-
-    plt.figure()
-    for c, idx in brand_color_idx.items():
-        plt.scatter(node_pos[idx, 0], node_pos[idx, 1], label=c)  # c=node_colors)
-    plt.title('feature1 distribution')
-    plt.savefig('./feature1_dist.png')
-
-    plt.figure()
-    for c, idx in shop_color_idx.items():
-        plt.scatter(node_pos[idx, 0], node_pos[idx, 1], label=c)  # c=node_colors)
-    plt.title('feature2 distribution')
-    plt.savefig('./feature2_dist.png')
-
-    plt.figure()
-    for c, idx in cate_color_idx.items():
-        plt.scatter(node_pos[idx, 0], node_pos[idx, 1], label=c)  # c=node_colors)
-    plt.title('feature3 distribution')
-    plt.savefig('./feature3_dist.png')
+def init_args():
+    # TODO: change args
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument('--root_path', type=str, default='data')
+    argparser.add_argument('--walk_length', type=int, default=50)
+    argparser.add_argument('--num_walks', type=int, default=10)
+    argparser.add_argument('--batch_size', type=int, default=16)
+    argparser.add_argument('--dim', type=int, default=20)
+    argparser.add_argument('--epochs', type=int, default=1)
+    argparser.add_argument('--window_size', type=int, default=4)
+    argparser.add_argument('--num_negative', type=int, default=1)
+    argparser.add_argument('--lr', type=float, default=0.01)
+    argparser.add_argument('--log_every', type=int, default=100,
+                           help="print log for every # times batch")
+    argparser.add_argument('--num_features', type=int, default=142)
+    argparser.add_argument('--schema', type=str, default=None,
+                           help="the path of random walk, set as '1-2-1,1-2-3-2-1',multi path should be separate with comma(,)")
+    
+    return argparser.parse_args()
 
 
-
-def write_embedding(embedding_result, outputFileName):
-    # sourcery skip: ensure-file-closed
-    f = open(outputFileName, 'w')
-    for i in range(len(embedding_result)):
-        s = " ".join(str(f) for f in embedding_result[i].tolist())
-        f.write(s + "\n")
-    f.close()
-
-
-def graph_context_batch_iter(all_pairs, batch_size, side_info, num_features):
-    while True:
-        start_idx = np.random.randint(0, len(all_pairs) - batch_size)
-        batch_idx = np.array(range(start_idx, start_idx + batch_size))
-        batch_idx = np.random.permutation(batch_idx)
-        batch = np.zeros((batch_size, num_features), dtype=np.int32)
-        labels = np.zeros((batch_size, 1), dtype=np.int32)
-        batch[:] = side_info[all_pairs[batch_idx, 0]]
-        labels[:, 0] = all_pairs[batch_idx, 1]
-        yield batch, labels
+def construct_graph(edges, nodes):
+    graph = defaultdict(set)
+    for edge in edges:
+        u, v = str(edge[0]), str(edge[1])
+        graph[u].add(v)
+    node_encodedr, node_decoder = node_transfer(nodes)
+    graph = convert_to_dgl_graph(graph)
+    return graph, node_encodedr, node_decoder
 
 
-def preprocess_nxgraph(graph):  # sourcery skip: convert-to-enumerate
-    node2idx = {}
-    idx2node = []
-    node_size = 0
-    for node in graph.nodes():
-        node2idx[node] = node_size
-        idx2node.append(node)
-        node_size += 1
-    return idx2node, node2idx
-
-
-def partition_dict(vertices, workers):  # sourcery skip: convert-to-enumerate
-    batch_size = (len(vertices) - 1) // workers + 1
-    part_list = []
-    part = []
+def convert_to_dgl_graph(graph):
+    g = nx.DiGraph()
     count = 0
-    for v1, nbs in vertices.items():
-        part.append((v1, nbs))
-        count += 1
-        if count % batch_size == 0:
-            part_list.append(part)
-            part = []
-    if len(part) > 0:
-        part_list.append(part)
-    return part_list
+    for head, tails in graph.items():
+        for tail in tails:
+            count = count+1
+            src, dst = int(head), int(tail)
+            g.add_edge(src, dst)
+    return dgl.from_networkx(g)
 
 
-def partition_list(vertices, workers):
-    batch_size = (len(vertices) - 1) // workers + 1
-    part_list = []
-    part = []
-    count = 0
-    for v1, nbs in enumerate(vertices):
-        part.append((v1, nbs))
-        count += 1
-        if count % batch_size == 0:
-            part_list.append(part)
-            part = []
-    if len(part) > 0:
-        part_list.append(part)
-    return part_list
+def node_transfer(node_raw_ids):
+    # raw_id -> new_id and new_id -> raw_id
+    node_encoder, node_decoder = {}, []
+    node_id = -1
+    for node_raw_id in node_raw_ids:
+        node_id = encode_id(node_encoder, 
+                        node_decoder, 
+                        node_raw_id, 
+                        node_id)
+    return node_encoder, node_decoder
 
 
-def partition_num(num, workers):
-    if num % workers == 0:
-        return [num//workers]*workers
+def encode_id(encoder, decoder, raw_id, encoded_id):
+    if raw_id in encoder:
+        return encoded_id
     else:
-        return [num//workers]*workers + [num % workers]
+        encoded_id += 1
+        encoder[raw_id] = encoded_id
+        decoder.append(raw_id)
 
+    return encoded_id
 
-def load_edge_data(path):
-    f_name = f'{path}/edge.txt'
-    print('We are loading data from:', f_name)
+  
+def get_valid_node_set(path):
+    f_name = path + '/edge.txt'
+    node_ids = []
     edge_data = []
-    all_nodes = []
     with open(f_name, 'r') as f:
         for line in f:
             words = line[:-1].split(' ')
             x, y = words[0], words[1]
             edge_data.append((x, y))
-            all_nodes.extend([x, y])
-    all_nodes = list(set(all_nodes))
-    print(f'Total training nodes: {len(all_nodes)}')
-    return edge_data
+            node_ids.extend([x, y])
+    node_ids = list(set(node_ids))
+    return node_ids, edge_data
 
-def load_node_type(path):
-    f_name = f'{path}/node_type.txt'
-    print('We are loading node type from:', f_name)
+def encode_side_info(path, feature_num, node_encoder):
+    f_name = path + '/side_info.txt'
+    side_info_encoder = {}
+    side_info_decoder = {}
+    for i in range(feature_num):
+        side_info_encoder[f"feature_{str(i)}"] = {}
+        side_info_decoder[f"feature_{str(i)}"] = []
+    
+    side_info = {}
+    features_id = [-1 for _ in range(feature_num)]
+    with open(f_name, "r") as f:
+        for line in f:
+            fields = line[:-1].split(" ")
+            node_raw_id = str(int(eval(fields[0])))
+            side_raw_id = fields[1:]
+            if node_raw_id in node_encoder:
+                node_id = node_encoder[node_raw_id]
+                side_info[node_id] = [node_id]
+                for i in range(feature_num):
+                    features_id[i] = encode_id(
+                        side_info_encoder[f"feature_{str(i)}"], 
+                        side_info_decoder[f"feature_{str(i)}"], 
+                        side_raw_id[i],
+                        features_id[i])
+                    side_info[node_id] += [side_info_encoder[f"feature_{str(i)}"][side_raw_id[i]]]
+    return side_info_encoder, side_info_decoder, side_info
+
+
+class TestEdge:
+    def __init__(self, src, dst, label):
+        self.src = src
+        self.dst = dst
+        self.label = label
+
+
+def split_train_test_graph(graph):
+    """
+        For test true edges, 1/3 of the edges are randomly chosen 
+        and removed as ground truth in the test set, 
+        the remaining graph is taken as the training set.
+    """
+    test_edges = []
+    neg_sampler = dgl.dataloading.negative_sampler.Uniform(1)
+    sampled_edge_ids = random.sample(range(graph.num_edges()), int(graph.num_edges() / 3))
+    for edge_id in sampled_edge_ids:
+        src, dst = graph.find_edges(edge_id)
+        test_edges.append(TestEdge(src, dst, 1))
+        src, dst = neg_sampler(graph, th.tensor([edge_id]))
+        test_edges.append(TestEdge(src, dst, 0))
+    
+    graph.remove_edges(sampled_edge_ids)
+    test_graph = test_edges
+
+    return graph, test_graph
+
+
+def load_node_type(path, node_encoder):
+    f_name = path + '/node_type.txt'
     node_type = {}
     with open(f_name, 'r') as f:
         for line in f:
             items = line.strip().split()
-            node_type[items[0]] = items[1]
+            node_type[node_encoder[items[0]]] = items[1]
     return node_type
-
-
-def get_G_from_edges(edges):
-    edge_dict = defaultdict(set)
-    for edge in edges:
-        u, v = str(edge[0]), str(edge[1])
-        edge_dict[u].add(v)
-        edge_dict[v].add(u)
-    return edge_dict

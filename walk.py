@@ -3,15 +3,14 @@ import multiprocessing
 
 from tqdm import tqdm
 
-def walk(args):  # sourcery skip: for-append-to-extend, list-comprehension, use-named-expression
-    walk_length, start, schema = args
+def walk(walk_length, start, schema, G, node_type):  # sourcery skip: for-append-to-extend, list-comprehension, use-named-expression
+    
     # Simulate a random walk starting from start node.
     rand = random.Random()
 
     if schema:
         schema_items = schema.split('-')
         assert schema_items[0] == schema_items[-1]
-
     walk = [start]
     while len(walk) < walk_length:
         cur = walk[-1]
@@ -37,24 +36,24 @@ class RWGraph():
         self.node_type = node_type_arr
         self.num_workers = num_workers
 
-    def node_list(self, nodes, num_walks):  # sourcery skip: yield-from
+    def node_list(self, nodes, num_walks):
         for _ in range(num_walks):
             for node in nodes:
                 yield node
 
-    def simulate_walks(self, num_walks, walk_length, schema=None):
+    def simulate_walks(self, nodes, num_walks, walk_length, schema=None):
         all_walks = []
-        nodes = list(self.G.keys())
         random.shuffle(nodes)
 
         if schema is None:
-            with multiprocessing.Pool(self.num_workers, initializer=initializer, initargs=(self.G, self.node_type)) as pool:
-                all_walks = list(pool.imap(walk, ((walk_length, node, '') for node in tqdm(self.node_list(nodes, num_walks))), chunksize=256))
+            for node in nodes:
+                walks = walk(walk_length, node, schema='', G=self.G, node_type=self.node_type)
+                all_walks.append(walks)
         else:
             schema_list = schema.split(',')
             for schema_iter in schema_list:
-                with multiprocessing.Pool(self.num_workers, initializer=initializer, initargs=(self.G, self.node_type)) as pool:
-                    walks = list(pool.imap(walk, ((walk_length, node, schema_iter) for node in tqdm(self.node_list(nodes, num_walks)) if schema_iter.split('-')[0] == self.node_type[node]), chunksize=512))
-                all_walks.extend(walks)
-
+                for node in nodes:
+                    if schema_iter.split('-')[0]==self.node_type[node]:
+                        walks = walk(walk_length, node, schema=schema_iter, G=self.G, node_type=self.node_type)
+                        all_walks.append(walks)
         return all_walks
